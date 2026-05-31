@@ -18,13 +18,16 @@
       <div class="resources">
         <div class="pill" id="pill-coins"><canvas class="ic" width="34" height="34" data-ic="coin"></canvas><span id="val-coins">0</span></div>
         <div class="pill" id="pill-wood"><canvas class="ic" width="34" height="34" data-ic="wood"></canvas><span id="val-wood">0</span></div>
+        <div class="pill" id="pill-biodiv" title="生物多様性"><canvas class="ic" width="34" height="34" data-ic="leaf"></canvas><span id="val-biodiv">0</span></div>
         <div class="level">
           <div class="lv-badge">Lv<span id="val-level">1</span></div>
           <div class="xp"><div class="xp-fill" id="xp-fill"></div><span class="xp-text" id="xp-text">0/100</span></div>
         </div>
+        <div class="season-chip" id="season-chip"><span class="se">🌸</span>1年目 春</div>
       </div>
       <div class="top-right">
         <button class="round-btn" id="btn-quests" title="クエスト">🎯<span class="badge" id="quest-badge">0</span></button>
+        <button class="round-btn" id="btn-upgrades" title="アップグレード">🔧</button>
         <button class="round-btn" id="btn-sound" title="サウンド">🔊</button>
         <button class="round-btn" id="btn-menu" title="メニュー">☰</button>
       </div>
@@ -32,6 +35,9 @@
 
     <!-- トースト通知 -->
     <div id="toasts" class="toasts"></div>
+
+    <!-- イベントバナー -->
+    <div id="event-banner" class="event-banner hidden"></div>
 
     <!-- 選択タイルのアクションカード -->
     <div id="action-card" class="action-card hidden">
@@ -59,6 +65,14 @@
     <div class="panel-card">
       <div class="panel-head"><h2>🎯 クエスト</h2><button class="panel-close" data-close="quest-panel">✕</button></div>
       <div id="quest-list" class="quest-list"></div>
+    </div>
+  </div>
+
+  <!-- ===== アップグレードパネル ===== -->
+  <div id="upgrade-panel" class="panel hidden">
+    <div class="panel-card">
+      <div class="panel-head"><h2>🔧 経営アップグレード</h2><button class="panel-close" data-close="upgrade-panel">✕</button></div>
+      <div id="upgrade-list" class="quest-list"></div>
     </div>
   </div>
 
@@ -96,6 +110,7 @@
   <script src="src/audio.js"></script>
   <script src="src/fx.js"></script>
   <script src="src/sprites.js"></script>
+  <script src="src/critters.js"></script>
   <script src="src/game.js"></script>
 </body>
 </html>

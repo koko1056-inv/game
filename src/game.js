@@ -9,7 +9,7 @@
   const TILE_W = S.TILE_W, TILE_H = S.TILE_H;
   const GRID = 9;                 // 9x9 マップ
   const CENTER = (GRID - 1) / 2;  // 中心
-  const SAVE_KEY = "morinoko_save_v2";
+  const SAVE_KEY = "morinoko_save_v3";
 
   // ---- 樹種データ ----
   const SPECIES = {
@@ -57,8 +57,34 @@
       coins: 200, wood: 0, level: 1, xp: 0,
       expanded: 0, tipIndex: 0,
       muted: false,
+      clock: 0,                 // ゲーム内経過(ms)：季節サイクル用
+      priceBoostUntil: 0,       // 木材価格高騰の終了時刻(Date.now)
+      upgrades: { growth: 0, sell: 0, seedling: 0, machine: 0 },
+      biodiv: 0,                // 生物多様性スコア
     };
   }
+
+  // ---- 経営アップグレード ----
+  const UPGRADES = {
+    growth:   { name:"早生品種",       icon:"sapling", max:3, base:300, per:0.15, fmt:(l)=>`木の成長速度 +${l*15}%` },
+    sell:     { name:"林道整備",       icon:"coin",    max:3, base:350, per:0.15, fmt:(l)=>`出荷の売値 +${l*15}%` },
+    seedling: { name:"育苗ハウス",     icon:"leaf",    max:2, base:400, per:0.15, fmt:(l)=>`苗木コスト −${l*15}%` },
+    machine:  { name:"高性能林業機械", icon:"sawmill", max:3, base:500, per:0.20, fmt:(l)=>`主伐の収量 +${l*20}%` },
+  };
+  function upgLevel(k) { return (state.upgrades && state.upgrades[k]) || 0; }
+  function upgCost(k) { return Math.round(UPGRADES[k].base * Math.pow(1.7, upgLevel(k))); }
+
+  // ---- 季節サイクル ----
+  const SEASON_LEN = 48000; // 1季の長さ(ms)
+  const SEASONS_INFO = [
+    { key:"spring", name:"春", emoji:"🌸", growth:1.30, grass:["#9ad96a","#7ec64a"], sky:["#d8f0d6","#aee0b4"] },
+    { key:"summer", name:"夏", emoji:"☀️", growth:1.15, grass:["#86d15a","#69bd45"], sky:["#bfe8c8","#8fcf9c"] },
+    { key:"autumn", name:"秋", emoji:"🍁", growth:1.00, grass:["#cdbe55","#c0913c"], sky:["#f1e2bd","#dcc089"] },
+    { key:"winter", name:"冬", emoji:"❄️", growth:0.62, grass:["#dde7df","#bcd0c2"], sky:["#dbe8ee","#bcd2d8"] },
+  ];
+  function seasonIndex() { return ((Math.floor((state.clock || 0) / SEASON_LEN) % 4) + 4) % 4; }
+  function seasonYear() { return Math.floor(Math.max(0, state.clock || 0) / (SEASON_LEN * 4)) + 1; }
+  function season() { return SEASONS_INFO[seasonIndex()]; }
 
   function makeTiles() {
     const t = [];
@@ -98,7 +124,7 @@
     return { x: (gx - gy) * TILE_W / 2, y: (gx + gy) * TILE_H / 2 };
   }
   function toScreen(wx, wy) {
-    return { x: (wx - cam.x) * cam.zoom + cw / 2, y: (wy - cam.y) * cam.zoom + ch / 2 };
+    return { x: (wx - cam.x) * cam.zoom + cw / 2 + shakeX, y: (wy - cam.y) * cam.zoom + ch / 2 + shakeY };
   }
   function tileScreen(gx, gy) { const w = worldOf(gx, gy); return toScreen(w.x, w.y); }
 
@@ -115,16 +141,17 @@
   let selected = null; // {gx,gy}
 
   function draw(now) {
-    const dt = Math.min(50, now - t0); t0 = now;
+    const dt = Math.max(0, Math.min(50, now - t0)); t0 = now;
     const time = now / 1000;
 
     update(dt, now);
     cam.zoom += (cam.tzoom - cam.zoom) * 0.18;
 
-    // 背景（空〜草地のグラデ）
+    // 背景（季節で変わる空〜草地のグラデ）
+    const sky = season().sky;
     const bg = ctx.createLinearGradient(0, 0, 0, ch);
-    bg.addColorStop(0, "#bfe8c8");
-    bg.addColorStop(1, "#8fcf9c");
+    bg.addColorStop(0, sky[0]);
+    bg.addColorStop(1, sky[1]);
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, cw, ch);
 
@@ -136,12 +163,13 @@
     order.sort((a, b) => (a.gx + a.gy) - (b.gx + b.gy) || a.gx - b.gx);
 
     // 1) 地面
+    const grass = season().grass;
     for (const tl of order) {
       const s = tileScreen(tl.gx, tl.gy);
       if (s.x < -160 || s.x > cw + 160 || s.y < -160 || s.y > ch + 200) continue;
       withZoom(s, () => {
         if (tl.kind === "locked") S.drawLockedTile(ctx, 0, 0, {});
-        else S.drawGrassTile(ctx, 0, 0, { seed: tl.seed });
+        else S.drawGrassTile(ctx, 0, 0, { seed: tl.seed, tint: grass[0], tintLo: grass[1] });
       });
     }
 
@@ -168,8 +196,15 @@
       withZoom(s, () => drawObject(tl, time));
     }
 
+    // 3.5) 野生動物・運搬中の丸太
+    drawWildlife(time);
+    drawFlyers();
+
     // 4) パーティクル・フロートテキスト（スクリーン空間）
     window.FX.draw(ctx);
+
+    // 5) 天候（最前面）
+    drawWeather();
 
     requestAnimationFrame(draw);
   }
@@ -185,16 +220,20 @@
 
   function drawObject(tl, time) {
     if (tl.kind === "tree") {
-      const sp = SPECIES[tl.species];
       const sway = Math.sin(time * 1.6 + tl.seed) * (0.01 + tl.stage * 0.012);
       const grow = tl.scale != null ? tl.scale : 1;
-      S.drawTree(ctx, 0, 0, tl.stage, { sway, scale: grow });
-      if (tl.stage < 3) {
-        // 成長中：進捗リング
-        const p = stageProgress(tl);
-        S.drawProgressRing(ctx, 0, -treeTop(tl), p);
+      if (tl.golden && window.Critters && window.Critters.drawGoldenTree) {
+        window.Critters.drawGoldenTree(ctx, tl.stage, time, { scale: grow });
       } else {
-        // 主伐可：バッジを上下にぴょこぴょこ
+        S.drawTree(ctx, 0, 0, tl.stage, { sway, scale: grow });
+      }
+      if (tl.sick && window.Critters && window.Critters.drawSickMarker) {
+        ctx.save(); ctx.translate(0, -treeTop(tl) - 4);
+        window.Critters.drawSickMarker(ctx, time, {});
+        ctx.restore();
+      } else if (tl.stage < 3 && !tl.golden) {
+        S.drawProgressRing(ctx, 0, -treeTop(tl), stageProgress(tl));
+      } else if (tl.stage >= 3) {
         const bob = Math.sin(time * 3 + tl.seed) * 3;
         S.drawReadyBadge(ctx, 0, -treeTop(tl) - 6, bob);
       }
@@ -220,9 +259,20 @@
   //  更新
   // ============================================================
   let lastTipAt = 0;
+  let lastSeason = -1, biodivTimer = 0, shakeX = 0, shakeY = 0, shake = 0;
   function update(dt, now) {
     window.FX.update(dt);
     const t = Date.now();
+
+    // 時間・季節
+    if (started) state.clock = (state.clock || 0) + dt;
+    const si = seasonIndex();
+    if (si !== lastSeason) {
+      const first = lastSeason === -1;
+      lastSeason = si;
+      onSeasonChange(first);
+    }
+
     for (let gx = 0; gx < GRID; gx++) for (let gy = 0; gy < GRID; gy++) {
       const tl = tiles[gx][gy];
       // 設置アニメ（ぽん！）
@@ -230,7 +280,7 @@
         tl.scale = Math.min(1, tl.scale + dt / 220);
       }
       // 樹木の成長（段階境界をチェーンしてオフラインでも正しく追いつく）
-      if (tl.kind === "tree" && tl.stage < 3) {
+      if (tl.kind === "tree" && tl.stage < 3 && !tl.golden) {
         while (tl.stage < 3 && t >= tl.nextAt) {
           tl.stage++;
           if (tl.stage < 3) {
@@ -244,7 +294,27 @@
           }
         }
       }
+      // 病虫害の進行
+      if (tl.sick && t - tl.sickAt > 18000) killSick(tl);
     }
+
+    updateWeather(dt);
+    updateWildlife(dt);
+    updateFlyers(dt);
+    if (started) maybeEvent();
+
+    // 価格高騰の失効
+    if (state._boostShown && Date.now() >= (state.priceBoostUntil || 0)) {
+      state._boostShown = false; hideBanner();
+    }
+    // 画面シェイク減衰
+    shake *= Math.pow(0.001, dt / 1000);
+    shakeX = (Math.random() - 0.5) * shake;
+    shakeY = (Math.random() - 0.5) * shake;
+
+    // 生物多様性の定期更新
+    biodivTimer -= dt;
+    if (biodivTimer <= 0) { biodivTimer = 1500; recomputeBiodiv(); }
   }
 
   function screenBurst(gx, gy, dy) {
@@ -258,8 +328,299 @@
     tl._stageDur = dur;
     tl.nextAt = Date.now() + dur * 1000;
   }
-  function growthMult() { return owned.lodge ? 1.25 : 1; }
-  function sellMult() { return owned.sawmill ? 1.5 : 1; }
+  function growthMult() {
+    const lodge = owned.lodge ? 1.25 : 1;
+    const upg = 1 + UPGRADES.growth.per * upgLevel("growth");
+    return lodge * upg * season().growth;
+  }
+  function sellMult() {
+    const mill = owned.sawmill ? 1.5 : 1;
+    const upg = 1 + UPGRADES.sell.per * upgLevel("sell");
+    const boost = Date.now() < (state.priceBoostUntil || 0) ? 1.8 : 1;
+    return mill * upg * boost;
+  }
+  function plantCost(sp) { return Math.round(sp.cost * (1 - UPGRADES.seedling.per * upgLevel("seedling"))); }
+  function harvestYield(tl) {
+    const sp = SPECIES[tl.species];
+    const base = tl.golden ? (60 + Math.round((state.biodiv || 0) * 0.8)) : sp.yield;
+    return Math.round(base * (1 + UPGRADES.machine.per * upgLevel("machine")));
+  }
+
+  // ============================================================
+  //  季節 / 天候 / イベント / 生物多様性 / 運搬演出
+  // ============================================================
+  function allTrees() {
+    const a = [];
+    for (let gx = 0; gx < GRID; gx++) for (let gy = 0; gy < GRID; gy++)
+      if (tiles[gx][gy].kind === "tree") a.push(tiles[gx][gy]);
+    return a;
+  }
+  function emptyGrass() {
+    const a = [];
+    for (let gx = 0; gx < GRID; gx++) for (let gy = 0; gy < GRID; gy++)
+      if (tiles[gx][gy].kind === "grass") a.push(tiles[gx][gy]);
+    return a;
+  }
+  function neighborsOf(tl) {
+    const r = [];
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dy]) => {
+      const nx = tl.gx + dx, ny = tl.gy + dy;
+      if (nx >= 0 && nx < GRID && ny >= 0 && ny < GRID) r.push(tiles[nx][ny]);
+    });
+    return r;
+  }
+
+  // ---- 季節変化 ----
+  function onSeasonChange(first) {
+    const s = season();
+    const chip = $("season-chip");
+    if (chip) chip.innerHTML = `<span class="se">${s.emoji}</span>${seasonYear()}年目 ${s.name}`;
+    A && A.setMusicMood && A.setMusicMood(s.key);
+    if (!first && started) {
+      toast(`${s.emoji} 季節が${s.name}になりました（${s.key === "spring" ? "成長アップ" : s.key === "winter" ? "成長ダウン" : "成長ふつう"}）`, "tip");
+    }
+    weather.length = 0; // 天候を作り直す
+  }
+
+  // ---- 天候パーティクル（季節） ----
+  let weather = [];
+  function weatherTarget() {
+    const k = season().key;
+    return k === "winter" ? 46 : k === "autumn" ? 34 : k === "spring" ? 22 : 0;
+  }
+  function spawnFlake() {
+    return { x: Math.random() * cw, y: Math.random() * -ch, vy: 0.6 + Math.random() * 1.4,
+      drift: 0.4 + Math.random() * 1.2, ph: Math.random() * 1000, r: Math.random() * 6, spin: (Math.random() - 0.5) * 0.1,
+      sz: 3 + Math.random() * 4 };
+  }
+  function updateWeather(dt) {
+    const want = weatherTarget();
+    while (weather.length < want) weather.push(spawnFlake());
+    if (weather.length > want) weather.length = want;
+    const step = dt / 16;
+    for (const f of weather) {
+      f.y += f.vy * step;
+      f.x += Math.sin((f.y + f.ph) * 0.02) * f.drift * step;
+      f.r += f.spin * step;
+      if (f.y > ch + 12) { f.y = -12; f.x = Math.random() * cw; }
+    }
+  }
+  function drawWeather() {
+    const k = season().key;
+    if (k === "summer") return;
+    ctx.save();
+    for (const f of weather) {
+      ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.r);
+      if (k === "winter") {
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.beginPath(); ctx.arc(0, 0, f.sz * 0.5, 0, Math.PI * 2); ctx.fill();
+      } else if (k === "autumn") {
+        ctx.fillStyle = ["#e08a2e","#d6602f","#caa12f"][f.sz % 3 | 0] || "#d6602f";
+        ctx.beginPath(); ctx.ellipse(0, 0, f.sz * 0.7, f.sz * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+      } else { // spring 桜
+        ctx.fillStyle = "rgba(255,200,222,0.92)";
+        ctx.beginPath(); ctx.ellipse(0, 0, f.sz * 0.6, f.sz * 0.42, 0, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  // ---- 生物多様性 & 野生動物 ----
+  function recomputeBiodiv() {
+    let grown = 0, mature = 0; const sp = new Set();
+    for (const tl of allTrees()) { if (tl.stage >= 2) grown++; if (tl.stage >= 3) mature++; sp.add(tl.species); }
+    state.biodiv = grown * 2 + mature + sp.size * 4 + Math.min(20, (state.expanded || 0) * 2);
+    refreshHUD();
+  }
+  let critters = [];
+  function walkable() {
+    const a = [];
+    for (const tl of [].concat(allTrees(), emptyGrass())) a.push(tl);
+    return a;
+  }
+  function updateWildlife(dt) {
+    const Cr = window.Critters;
+    const target = Cr ? Math.min(6, Math.floor((state.biodiv || 0) / 8)) : 0;
+    while (critters.length < target) spawnCritter();
+    while (critters.length > target) critters.pop();
+    const step = dt / 1000;
+    for (const c of critters) {
+      c.t += step;
+      if (c.pause > 0) { c.pause -= dt; continue; }
+      const dx = c.tx - c.x, dy = c.ty - c.y, d = Math.hypot(dx, dy);
+      if (d < 0.05) {
+        const tiles2 = walkable();
+        if (tiles2.length) { const n = tiles2[Math.floor(Math.random() * tiles2.length)]; c.tx = n.gx; c.ty = n.gy; }
+        c.pause = 600 + Math.random() * 2200;
+      } else {
+        const sp = c.speed * step;
+        c.x += dx / d * Math.min(sp, d); c.y += dy / d * Math.min(sp, d);
+        c.flip = dx < 0;
+      }
+    }
+  }
+  function spawnCritter() {
+    const Cr = window.Critters; if (!Cr) return;
+    const w = walkable(); if (!w.length) return;
+    const start = w[Math.floor(Math.random() * w.length)];
+    const type = Cr.types[Math.floor(Math.random() * Cr.types.length)];
+    critters.push({ type, x: start.gx, y: start.gy, tx: start.gx, ty: start.gy, speed: 0.6 + Math.random() * 0.5, t: Math.random() * 5, pause: 500, flip: false });
+    if (started) {
+      const names = { bird:"小鳥", rabbit:"ウサギ", squirrel:"リス", deer:"シカ", fox:"キツネ" };
+      toast(`🐾 ${names[type] || "動物"}が森にやってきた！ 豊かな森のしるしです`, "good");
+    }
+  }
+  function drawWildlife(time) {
+    const Cr = window.Critters; if (!Cr) return;
+    const sorted = critters.slice().sort((a, b) => (a.x + a.y) - (b.x + b.y));
+    for (const c of sorted) {
+      const w = worldOf(c.x, c.y);
+      const s = toScreen(w.x, w.y);
+      withZoom(s, () => Cr.draw(ctx, c.type, c.t, { scale: 0.9, flip: c.flip }));
+    }
+  }
+
+  // ---- 運搬演出（丸太が土場へ飛ぶ） ----
+  let flyers = [];
+  function spawnFlyer(sx, sy) {
+    const dep = depotTile();
+    const ds = screenBurst(dep.gx, dep.gy, 18);
+    flyers.push({ sx, sy, ex: ds[0], ey: ds[1], t: 0, dur: 600 + Math.random() * 150, spin: Math.random() * 6 });
+  }
+  function updateFlyers(dt) {
+    for (const f of flyers) {
+      f.t += dt;
+      if (f.t >= f.dur) { window.FX.burst(f.ex, f.ey, "dust", { count: 5 }); f.dead = true; }
+    }
+    flyers = flyers.filter(f => !f.dead);
+  }
+  function drawFlyers() {
+    for (const f of flyers) {
+      const p = Math.min(1, f.t / f.dur);
+      const x = f.sx + (f.ex - f.sx) * p;
+      const y = f.sy + (f.ey - f.sy) * p - Math.sin(p * Math.PI) * 90;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(f.spin + p * 8);
+      S.drawWoodIcon(ctx, 0, 0, 11);
+      ctx.restore();
+    }
+  }
+
+  // ---- イベント ----
+  let nextEventAt = 0;
+  function maybeEvent() {
+    if (Date.now() < nextEventAt) return;
+    nextEventAt = Date.now() + 34000 + Math.random() * 30000;
+    triggerRandomEvent();
+  }
+  function triggerRandomEvent() {
+    const trees = allTrees();
+    const pool = [["subsidy", 3], ["marketBoom", 3]];
+    if (trees.filter(t => t.stage >= 1).length >= 3) pool.push(["typhoon", 2]);
+    if (trees.filter(t => t.stage >= 1 && !t.sick).length >= 2) pool.push(["pest", 2]);
+    if (emptyGrass().length >= 1) pool.push(["golden", 1]);
+    const total = pool.reduce((s, p) => s + p[1], 0);
+    let r = Math.random() * total, pick = pool[0][0];
+    for (const [k, w] of pool) { if ((r -= w) <= 0) { pick = k; break; } }
+    ({ subsidy: evSubsidy, marketBoom: evBoom, typhoon: evTyphoon, pest: evPest, golden: evGolden }[pick])();
+  }
+  function evSubsidy() {
+    const amt = 80 + state.level * 15 + Math.round((state.biodiv || 0) * 2);
+    state.coins += amt;
+    A.play("fanfare");
+    const d = screenBurst(depotTile().gx, depotTile().gy, 30);
+    window.FX.burst(d[0], d[1], "coins", { count: 14 });
+    toast(`🏛️ 森林整備の補助金 +¥${amt.toLocaleString()}（生物多様性が高いほど手厚い）`, "good");
+    save(); refreshHUD();
+  }
+  function evBoom() {
+    state.priceBoostUntil = Date.now() + 25000;
+    state._boostShown = true;
+    A.play("alert");
+    showBanner("📈 木材価格が高騰中！ 今が出荷のチャンス（売値↑）", "boom");
+    toast("📈 木材価格 高騰！ 25秒間、出荷の売値が大幅アップ", "good");
+  }
+  function evTyphoon() {
+    A.play("thunder"); shake = 22;
+    let dmg = 0;
+    const p = owned.lodge ? 0.28 : 0.5;
+    for (const tl of allTrees()) {
+      if (tl.stage >= 1 && !tl.golden && Math.random() < p) {
+        tl.stage = Math.max(0, tl.stage - 1);
+        startStage(tl); tl.scale = 0.85; dmg++;
+        const b = screenBurst(tl.gx, tl.gy, 40);
+        window.FX.burst(b[0], b[1], "leaves", { count: 10 });
+      }
+    }
+    showBanner("🌀 台風が通過！", "warn", 3200);
+    toast(dmg > 0
+      ? `🌀 台風で ${dmg}本 の木が傷つきました${owned.lodge ? "（詰所の手入れで被害を軽減）" : "（林業詰所で被害を減らせます）"}`
+      : "🌀 台風が来ましたが、被害はありませんでした", "warn");
+    save();
+  }
+  function evPest() {
+    const cand = allTrees().filter(t => t.stage >= 1 && !t.sick && !t.golden);
+    if (!cand.length) return;
+    const tl = cand[Math.floor(Math.random() * cand.length)];
+    tl.sick = true; tl.sickAt = Date.now();
+    A.play("alert");
+    showBanner("🐛 病虫害が発生！ 木をタップして「防除」しよう（放置で枯死＆まん延）", "warn");
+    toast("🐛 病虫害が発生！ 早めの防除を", "warn");
+  }
+  function evGolden() {
+    const cand = emptyGrass(); if (!cand.length) return evSubsidy();
+    const tl = cand[Math.floor(Math.random() * cand.length)];
+    const keys = Object.keys(SPECIES).filter(k => SPECIES[k].unlock <= state.level);
+    tl.kind = "tree"; tl.species = keys[Math.floor(Math.random() * keys.length)];
+    tl.stage = 3; tl.golden = true; tl.scale = 0.3;
+    A.play("magic");
+    const b = screenBurst(tl.gx, tl.gy, 40);
+    window.FX.burst(b[0], b[1], "sparkle", { count: 22, power: 1.3 });
+    showBanner("✨ 黄金の木が出現！ 主伐すれば大収入！", "gold", 6000);
+    toast("✨ 伝説の黄金の木が現れた！", "level");
+    save();
+  }
+
+  function killSick(tl) {
+    // 病虫害で枯死 → 跡地は空き地に。隣の木へまん延することも
+    const b = screenBurst(tl.gx, tl.gy, 40);
+    window.FX.burst(b[0], b[1], "leaves", { count: 8 });
+    tl.kind = "grass"; delete tl.species; delete tl.stage; delete tl.sick; delete tl.golden;
+    let spread = "";
+    const nb = neighborsOf(tl).filter(t => t.kind === "tree" && !t.sick && !t.golden);
+    if (nb.length && Math.random() < 0.5) { const v = nb[Math.floor(Math.random() * nb.length)]; v.sick = true; v.sickAt = Date.now(); spread = " 隣の木にまん延…"; }
+    toast("🥀 病虫害で木が枯れてしまいました…" + spread, "warn");
+    if (!allTrees().some(t => t.sick)) hideBanner();
+    recomputeBiodiv(); save();
+  }
+  function treat(tl) {
+    const cost = 90;
+    if (state.coins < cost) { A.play("error"); toast("コインが足りません", "warn"); return; }
+    state.coins -= cost; tl.sick = false; delete tl.sickAt;
+    A.play("upgrade");
+    const b = screenBurst(tl.gx, tl.gy, 40);
+    window.FX.burst(b[0], b[1], "sparkle", { count: 10 });
+    flash(`防除 -¥${cost}`, tl, "#3f8f37", -50);
+    toast("🧪 防除に成功！ 木を守りました", "good");
+    if (!allTrees().some(t => t.sick)) hideBanner();
+    save(); refreshHUD(); openCard(tl);
+  }
+
+  // ---- イベントバナー ----
+  let bannerTimer = null;
+  function showBanner(text, type, autoHide) {
+    const el = $("event-banner");
+    if (!el) return;
+    el.className = "event-banner " + (type || "");
+    el.textContent = text;
+    el.classList.remove("hidden");
+    if (bannerTimer) clearTimeout(bannerTimer);
+    if (autoHide) bannerTimer = setTimeout(() => el.classList.add("hidden"), autoHide);
+  }
+  function hideBanner() {
+    const el = $("event-banner"); if (el) el.classList.add("hidden");
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  }
 
   // ============================================================
   //  入力（パン・ズーム・タップ）
@@ -369,9 +730,11 @@
   // ============================================================
   function plant(tl, speciesId) {
     const sp = SPECIES[speciesId];
-    if (state.coins < sp.cost) { A.play("error"); toast("コインが足りません", "warn"); return false; }
-    state.coins -= sp.cost;
+    const cost = plantCost(sp);
+    if (state.coins < cost) { A.play("error"); toast("コインが足りません", "warn"); return false; }
+    state.coins -= cost;
     tl.kind = "tree"; tl.species = speciesId; tl.stage = 0; tl.scale = 0.2;
+    delete tl.sick; delete tl.golden;
     startStage(tl);
     stats.planted = (stats.planted || 0) + 1;
     addXp(2);
@@ -379,27 +742,42 @@
     const [bx, by] = screenBurst(tl.gx, tl.gy, 10);
     window.FX.burst(bx, by, "dust", { count: 8 });
     window.FX.burst(bx, by, "sparkle", { count: 5 });
-    flash(`-¥${sp.cost}`, tl, "#e2674f");
+    flash(`-¥${cost}`, tl, "#e2674f");
     bumpQuest("plant");
+    recomputeBiodiv();
     save(); refreshHUD();
     return true;
   }
 
+  let combo = 0, lastHarvestAt = 0;
   function harvest(tl) {
-    const sp = SPECIES[tl.species];
-    const amount = sp.yield;
+    const golden = !!tl.golden;
+    let amount = harvestYield(tl);
+    // コンボ（短時間に連続主伐で倍率アップ）
+    const now = performance.now();
+    if (now - lastHarvestAt < 3500) combo++; else combo = 1;
+    lastHarvestAt = now;
+    const mult = Math.min(2, 1 + (combo - 1) * 0.15);
+    amount = Math.round(amount * mult);
     state.wood += amount;
     stats.harvested = (stats.harvested || 0) + 1;
-    addXp(5);
-    A.play("chop");
+    addXp(golden ? 14 : 5);
+    A.play(golden ? "magic" : "chop");
     const [bx, by] = screenBurst(tl.gx, tl.gy, 40);
     window.FX.burst(bx, by, "woodchips", { count: 14 });
-    window.FX.burst(bx, by, "leaves", { count: 10 });
-    flash(`+${amount} 木`, tl, "#8a5a30", -50);
+    window.FX.burst(bx, by, golden ? "coins" : "leaves", { count: golden ? 16 : 10 });
+    flash(`+${amount} 木`, tl, golden ? "#e29a18" : "#8a5a30", -50);
+    if (combo >= 2) {
+      A.play("combo", { step: combo });
+      window.FX.floatText(bx, by - 26, `コンボ x${mult.toFixed(2)}!`, { color: "#e2674f", size: 18 });
+    }
+    // 丸太が土場へ飛ぶ演出
+    spawnFlyer(bx, by); if (amount > 14) spawnFlyer(bx + 8, by);
     // 伐採跡地（再造林を促す）
-    tl.kind = "grass"; delete tl.species; delete tl.stage;
+    tl.kind = "grass"; delete tl.species; delete tl.stage; delete tl.golden; delete tl.sick;
     bumpQuest("harvest");
-    if (Math.random() < 0.5) maybeTip();
+    if (!golden && Math.random() < 0.5) maybeTip();
+    recomputeBiodiv();
     save(); refreshHUD();
     if (selected && selected.gx === tl.gx && selected.gy === tl.gy) openCard(tl);
   }
@@ -450,6 +828,7 @@
     tl.kind = "grass"; tl.scale = 0.2;
     state.expanded++;
     addXp(8);
+    recomputeBiodiv();
     A.play("build");
     const [bx, by] = screenBurst(tl.gx, tl.gy, 10);
     window.FX.burst(bx, by, "sparkle", { count: 12 });
@@ -549,7 +928,7 @@
     if (ok && b.type === "plant" && !canAfford(b)) cancelPlace();
   }
   function canAfford(b) {
-    const cost = b.type === "plant" ? SPECIES[b.species].cost : b.cost;
+    const cost = b.type === "plant" ? plantCost(SPECIES[b.species]) : b.cost;
     return state.coins >= cost;
   }
 
@@ -570,6 +949,9 @@
     badge.textContent = claimable;
     badge.classList.toggle("hidden", claimable === 0);
     $("btn-sound").textContent = state.muted ? "🔇" : "🔊";
+    const sc = $("season-chip");
+    if (sc) { const s = season(); sc.innerHTML = `<span class="se">${s.emoji}</span>${seasonYear()}年目 ${s.name}`; }
+    const bd = $("val-biodiv"); if (bd) bd.textContent = state.biodiv || 0;
   }
 
   function depotTile() {
@@ -598,8 +980,9 @@
         if (state.level < b.unlock) continue;
         if (b.type === "plant") {
           const sp = SPECIES[b.species];
-          acts.appendChild(makeBtn(`${sp.name}を植える`, coinCostSpan(sp.cost),
-            state.coins >= sp.cost, "green", () => { plant(tl, b.species); }));
+          const c = plantCost(sp);
+          acts.appendChild(makeBtn(`${sp.name}を植える`, coinCostSpan(c),
+            state.coins >= c, "green", () => { plant(tl, b.species); }));
         } else {
           if (owned[b.building]) continue;
           acts.appendChild(makeBtn(`${b.name}を建てる`, coinCostSpan(b.cost),
@@ -610,25 +993,28 @@
       const sp = SPECIES[tl.species];
       const stName = ["苗木", "若木", "成木", "主伐期"][tl.stage];
       iconKind = tl.stage >= 2 ? "tree" : "sapling";
-      title = `${sp.name}（${stName}）`;
-      if (tl.stage < 3) {
+      title = (tl.golden ? "✨黄金の" : "") + `${sp.name}（${stName}）`;
+      if (tl.sick) {
+        sub = "🐛 病虫害にかかっています！ このままだと枯れて隣にもまん延します。早く防除を。";
+        acts.appendChild(makeBtn("🧪 防除する", coinCostSpan(90), state.coins >= 90, "red", () => treat(tl)));
+      } else if (tl.golden) {
+        sub = `伝説の黄金の木！ 主伐すると木材 ${harvestYield(tl)} の大収入。今すぐ伐ろう！`;
+        acts.appendChild(makeBtn(`🪓 主伐する（+${harvestYield(tl)} 木）`, "", true, "gold", () => harvest(tl)));
+      } else if (tl.stage < 3) {
         const left = Math.max(0, Math.ceil((tl.nextAt - Date.now()) / 1000));
-        sub = `成長中… 次の段階まで約${left}秒。${sp.blurb}`;
+        sub = `成長中… 次の段階まで約${left}秒（${season().emoji}${season().name}）。${sp.blurb}`;
+        if (tl.stage === 2) acts.appendChild(makeBtn("✂️ 間伐する", "", true, "ghost", () => thin(tl)));
       } else {
-        sub = `主伐できます！ 収穫で木材 ${sp.yield} を得ます。伐ったら再造林を。`;
-      }
-      if (tl.stage === 2) {
-        acts.appendChild(makeBtn("間伐する", "", true, "ghost", () => thin(tl)));
-      }
-      if (tl.stage === 3) {
-        acts.appendChild(makeBtn(`🪓 主伐する（+${sp.yield} 木）`, "", true, "gold", () => harvest(tl)));
+        sub = `主伐できます！ 収穫で木材 ${harvestYield(tl)} を得ます。伐ったら再造林を。`;
+        acts.appendChild(makeBtn(`🪓 主伐する（+${harvestYield(tl)} 木）`, "", true, "gold", () => harvest(tl)));
       }
     } else if (tl.kind === "building") {
       if (tl.building === "depot") {
         iconKind = "depot";
         title = "土場（出荷拠点）";
         const price = Math.round(SELL_BASE * sellMult());
-        sub = `木材を市場へ出荷して現金化。現在の在庫 ${state.wood}（目安 ¥${(state.wood * price).toLocaleString()}／市況変動あり）。`;
+        const boom = Date.now() < (state.priceBoostUntil || 0) ? " 📈高騰中！" : "";
+        sub = `木材を市場へ出荷して現金化。在庫 ${state.wood}（目安 ¥${(state.wood * price).toLocaleString()}／市況変動あり）。${boom}`;
         acts.appendChild(makeBtn("🚚 出荷する", "", state.wood > 0, "gold", () => sellWood()));
       } else if (tl.building === "sawmill") {
         iconKind = "sawmill"; title = "製材所";
@@ -671,7 +1057,7 @@
       item.className = "build-item";
       const locked = state.level < b.unlock;
       const built = b.type === "building" && owned[b.building];
-      const cost = b.type === "plant" ? SPECIES[b.species].cost : b.cost;
+      const cost = b.type === "plant" ? plantCost(SPECIES[b.species]) : b.cost;
       item.innerHTML =
         `<canvas width="52" height="52" data-ic="${b.icon}"></canvas>` +
         `<div class="bi-name">${b.name}</div>` +
@@ -717,6 +1103,8 @@
       key:"level", goal:3, reward:{coins:260} },
     { id:"q6", title:"付加価値づくり", desc:"製材所を建てよう。加工すると木材の価値が上がります。",
       key:"build:sawmill", goal:1, reward:{coins:240} },
+    { id:"q7", title:"豊かな森へ", desc:"生物多様性スコアを 20 まで高めよう（木を増やし種類を多く）。",
+      key:"biodiv", goal:20, reward:{coins:320, xp:40} },
   ];
   // 進捗カウンタ（statsから算出 or 専用）
   function questValue(q) {
@@ -727,6 +1115,7 @@
     if (q.key === "level") return state.level || 1;
     if (q.key === "build:sawmill") return owned.sawmill ? 1 : 0;
     if (q.key === "build:lodge") return owned.lodge ? 1 : 0;
+    if (q.key === "biodiv") return state.biodiv || 0;
     return 0;
   }
   function questDone(q) { return questValue(q) >= q.goal; }
@@ -782,6 +1171,50 @@
   }
 
   // ============================================================
+  //  経営アップグレード
+  // ============================================================
+  function renderUpgrades() {
+    const list = $("upgrade-list"); if (!list) return;
+    list.innerHTML = "";
+    const head = document.createElement("p");
+    head.style.cssText = "font-size:0.8rem;color:#6b4a25;margin:0 0 10px";
+    head.innerHTML = `🌿 生物多様性スコア: <b>${state.biodiv || 0}</b> ／ 高いほど補助金や黄金の木が手厚くなります。`;
+    list.appendChild(head);
+    for (const k in UPGRADES) {
+      const u = UPGRADES[k], lv = upgLevel(k), maxed = lv >= u.max, cost = upgCost(k);
+      const div = document.createElement("div");
+      div.className = "quest" + (maxed ? " done" : "");
+      div.innerHTML =
+        `<div class="quest-title">⚙️ ${u.name} <span style="font-weight:800;color:#3f8f37">Lv${lv}/${u.max}</span></div>` +
+        `<div class="quest-desc">現在: ${lv > 0 ? u.fmt(lv) : "効果なし"}${maxed ? "（最大）" : ` → 次: ${u.fmt(lv + 1)}`}</div>` +
+        `<div class="quest-foot"></div>`;
+      const foot = div.querySelector(".quest-foot");
+      if (maxed) {
+        const s = document.createElement("span"); s.textContent = "最大レベル"; s.style.cssText = "color:#3f8f37;font-weight:800"; foot.appendChild(s);
+      } else {
+        const btn = document.createElement("button");
+        btn.className = "btn gold"; btn.disabled = state.coins < cost;
+        btn.innerHTML = "強化する " + coinCostSpan(cost);
+        btn.addEventListener("click", () => buyUpgrade(k));
+        foot.appendChild(btn);
+      }
+      list.appendChild(div);
+    }
+    paintIcons(list);
+  }
+  function buyUpgrade(k) {
+    const u = UPGRADES[k]; if (upgLevel(k) >= u.max) return;
+    const cost = upgCost(k);
+    if (state.coins < cost) { A.play("error"); toast("コインが足りません", "warn"); return; }
+    state.coins -= cost;
+    state.upgrades[k] = upgLevel(k) + 1;
+    A.play("upgrade");
+    window.FX.burst(cw / 2, ch / 3, "sparkle", { count: 16, power: 1.2 });
+    toast(`⚙️ ${u.name} を強化！ ${u.fmt(upgLevel(k))}`, "good");
+    save(); refreshHUD(); renderUpgrades();
+  }
+
+  // ============================================================
   //  パネル / ボタン配線
   // ============================================================
   function openPanel(id) { A.play("whoosh"); $(id).classList.remove("hidden"); }
@@ -791,6 +1224,7 @@
     $("card-close").addEventListener("click", () => closeCard());
     $("place-cancel").addEventListener("click", () => cancelPlace());
     $("btn-quests").addEventListener("click", () => { renderQuests(); openPanel("quest-panel"); });
+    $("btn-upgrades").addEventListener("click", () => { renderUpgrades(); openPanel("upgrade-panel"); });
     $("btn-menu").addEventListener("click", () => { updateMenu(); openPanel("menu-panel"); });
     $("btn-sound").addEventListener("click", toggleSound);
     $("btn-help").addEventListener("click", () => { closePanel("menu-panel"); renderHelp(); openPanel("help-panel"); });
@@ -805,7 +1239,7 @@
   function toggleSound() {
     state.muted = !state.muted;
     A.setMuted(state.muted);
-    if (!state.muted) A.startAmbient();
+    if (!state.muted) { A.startAmbient(); A.startMusic && A.startMusic(); }
     refreshHUD(); save();
   }
 
@@ -836,6 +1270,14 @@
       `⑤ コインで<b>土地の開拓</b>や<b>製材所・詰所</b>を建てて経営を拡大！</p>` +
       `<h3>操作</h3>` +
       `<p>ドラッグで移動 / ホイール・ピンチで拡大縮小 / タップで選択。</p>` +
+      `<h3>季節と天候 🌸☀️🍁❄️</h3>` +
+      `<p>季節がめぐり、春は成長アップ・冬はダウン。画面には桜・落ち葉・雪が舞います。</p>` +
+      `<h3>イベント</h3>` +
+      `<p>🌀 台風（詰所で被害軽減）/ 🐛 病虫害（タップで防除、放置で枯死＆まん延）/ 📈 価格高騰（出荷チャンス）/ 🏛️ 補助金 / ✨ 黄金の木（大収入）。</p>` +
+      `<h3>野生動物と生物多様性 🐾</h3>` +
+      `<p>木を増やし種類を多くすると生物多様性が高まり、小鳥・リス・シカなどがやってきます。補助金や黄金の木も手厚くなります。</p>` +
+      `<h3>コンボ＆アップグレード</h3>` +
+      `<p>短時間に連続で主伐すると<b>コンボ倍率</b>で収量アップ。🔧ボタンの<b>経営アップグレード</b>で成長・売値・苗木コスト・収量を強化できます。</p>` +
       `<h3>林業まめ知識</h3>` + tips;
   }
 
@@ -847,14 +1289,14 @@
       const treeData = [];
       for (let gx = 0; gx < GRID; gx++) for (let gy = 0; gy < GRID; gy++) {
         const t = tiles[gx][gy];
-        if (t.kind === "tree") treeData.push({ gx, gy, species: t.species, stage: t.stage, nextAt: t.nextAt, dur: t._stageDur });
+        if (t.kind === "tree") treeData.push({ gx, gy, species: t.species, stage: t.stage, nextAt: t.nextAt, dur: t._stageDur, sick: t.sick, sickAt: t.sickAt, golden: t.golden });
         else if (t.kind === "grass" && !(Math.max(Math.abs(gx-CENTER),Math.abs(gy-CENTER))<=1)) treeData.push({ gx, gy, grass: true });
         else if (t.kind === "building" && t.building !== "depot") treeData.push({ gx, gy, building: t.building });
       }
       localStorage.setItem(SAVE_KEY, JSON.stringify({
         state, stats, owned,
         quests: QUESTS.map(q => ({ id: q.id, claimed: !!q.claimed })),
-        tiles: treeData, v: 2,
+        tiles: treeData, v: 3,
       }));
     } catch (e) { /* localStorage不可でも続行 */ }
   }
@@ -862,7 +1304,7 @@
   function load() {
     let data = null;
     try { data = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) {}
-    if (!data || data.v !== 2) return false;
+    if (!data || data.v !== 3) return false;
     state = Object.assign(freshState(), data.state);
     stats = data.stats || {};
     owned = Object.assign({ sawmill: false, lodge: false }, data.owned);
@@ -871,7 +1313,7 @@
       const t = tiles[td.gx][td.gy];
       if (td.grass) { t.kind = "grass"; }
       else if (td.building) { t.kind = "building"; t.building = td.building; }
-      else { t.kind = "tree"; t.species = td.species; t.stage = td.stage; t.nextAt = td.nextAt; t._stageDur = td.dur; }
+      else { t.kind = "tree"; t.species = td.species; t.stage = td.stage; t.nextAt = td.nextAt; t._stageDur = td.dur; if (td.sick) { t.sick = true; t.sickAt = td.sickAt || Date.now(); } if (td.golden) t.golden = true; }
     });
     (data.quests || []).forEach(qs => { const q = QUESTS.find(x => x.id === qs.id); if (q) q.claimed = qs.claimed; });
     return true;
@@ -884,8 +1326,10 @@
     state = freshState(); stats = {}; owned = { sawmill: false, lodge: false };
     tiles = makeTiles();
     selected = null; cancelPlace();
+    critters = []; flyers = []; weather = []; combo = 0;
+    nextEventAt = Date.now() + 25000; lastSeason = -1; hideBanner();
     closePanel("menu-panel");
-    centerCamera(); buildBar(); refreshHUD();
+    centerCamera(); buildBar(); refreshHUD(); recomputeBiodiv();
     toast("新しい山林からスタート！", "good");
   }
 
@@ -911,8 +1355,10 @@
     started = true;
     $("intro").classList.add("hidden");
     A.init();
-    if (!state.muted) { A.setMuted(false); A.startAmbient(); }
+    if (!state.muted) { A.setMuted(false); A.startAmbient(); A.startMusic && A.startMusic(); A.setMusicMood && A.setMusicMood(season().key); }
     else A.setMuted(true);
+    nextEventAt = Date.now() + 25000;
+    recomputeBiodiv();
     toast("ようこそ！ まずは空き地に苗木を植えましょう 🌱", "tip");
   }
 
@@ -928,6 +1374,7 @@
     wireUI();
     buildBar();
     refreshHUD();
+    recomputeBiodiv();
     paintIcons(document);
     requestAnimationFrame(draw);
     // 自動セーブ
