@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>森を育てよう 〜林業経営シミュレーション〜</title>
+  <link rel="stylesheet" href="src/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>🌲 森を育てよう <span class="subtitle">林業経営シミュレーション</span></h1>
+    <div class="stats">
+      <div class="stat"><span class="label">経過</span><span id="stat-time" class="value">1年目 春</span></div>
+      <div class="stat"><span class="label">資金</span><span id="stat-money" class="value">¥50,000</span></div>
+      <div class="stat"><span class="label">土場の在庫</span><span id="stat-stock" class="value">0.0 m³</span></div>
+      <div class="stat"><span class="label">作業員</span><span id="stat-workers" class="value">1人</span></div>
+      <div class="stat"><span class="label">環境スコア</span><span id="stat-eco" class="value">0</span></div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="forest-panel">
+      <div class="panel-head">
+        <h2>あなたの山林</h2>
+        <p class="hint">マスをクリックして作業を選びます。灰色のマスは未開拓地です。</p>
+      </div>
+      <div id="grid" class="grid" aria-label="森のマス目"></div>
+      <div class="legend">
+        <span>⬛ 空き地</span>
+        <span>🌱 苗木</span>
+        <span>🌿 若木</span>
+        <span>🌲 成木</span>
+        <span>🌳 主伐期</span>
+        <span>🔒 未開拓</span>
+      </div>
+    </section>
+
+    <aside class="control-panel">
+      <div class="action-box">
+        <h2>作業メニュー</h2>
+        <div id="cell-info" class="cell-info">マスを選択してください。</div>
+        <div id="actions" class="actions"></div>
+      </div>
+
+      <div class="shop-box">
+        <h2>経営・拡大</h2>
+        <button id="btn-ship" class="big-btn ship">🚚 木材を出荷する</button>
+        <button id="btn-buy-land" class="big-btn">🗺️ 土地を購入</button>
+        <button id="btn-hire" class="big-btn">👷 作業員を雇う</button>
+        <button id="btn-buy-machine" class="big-btn">🚜 林業機械を購入</button>
+      </div>
+
+      <button id="btn-next" class="next-btn">⏭️ 次の季節へ</button>
+    </aside>
+  </main>
+
+  <section class="log-panel">
+    <h2>📋 作業日誌 ＆ 林業まめ知識</h2>
+    <div id="log" class="log"></div>
+  </section>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="modal-title">植える樹種を選ぶ</h2>
+      <div id="modal-body" class="modal-body"></div>
+      <button id="modal-close" class="modal-close">閉じる</button>
+    </div>
+  </div>
+
+  <script src="src/game.js"></script>
+</body>
+</html>
