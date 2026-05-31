@@ -2,71 +2,100 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>森を育てよう 〜林業経営シミュレーション〜</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#2e7d4f" />
+  <title>もりのこ 〜林業タウン〜</title>
   <link rel="stylesheet" href="src/style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <h1>🌲 森を育てよう <span class="subtitle">林業経営シミュレーション</span></h1>
-    <div class="stats">
-      <div class="stat"><span class="label">経過</span><span id="stat-time" class="value">1年目 春</span></div>
-      <div class="stat"><span class="label">資金</span><span id="stat-money" class="value">¥50,000</span></div>
-      <div class="stat"><span class="label">土場の在庫</span><span id="stat-stock" class="value">0.0 m³</span></div>
-      <div class="stat"><span class="label">作業員</span><span id="stat-workers" class="value">1人</span></div>
-      <div class="stat"><span class="label">環境スコア</span><span id="stat-eco" class="value">0</span></div>
+  <!-- ゲーム描画キャンバス -->
+  <canvas id="game"></canvas>
+
+  <!-- ===== HUD ===== -->
+  <div id="hud" class="hud">
+    <!-- 上段：資源 -->
+    <div class="hud-top">
+      <div class="resources">
+        <div class="pill" id="pill-coins"><canvas class="ic" width="34" height="34" data-ic="coin"></canvas><span id="val-coins">0</span></div>
+        <div class="pill" id="pill-wood"><canvas class="ic" width="34" height="34" data-ic="wood"></canvas><span id="val-wood">0</span></div>
+        <div class="level">
+          <div class="lv-badge">Lv<span id="val-level">1</span></div>
+          <div class="xp"><div class="xp-fill" id="xp-fill"></div><span class="xp-text" id="xp-text">0/100</span></div>
+        </div>
+      </div>
+      <div class="top-right">
+        <button class="round-btn" id="btn-quests" title="クエスト">🎯<span class="badge" id="quest-badge">0</span></button>
+        <button class="round-btn" id="btn-sound" title="サウンド">🔊</button>
+        <button class="round-btn" id="btn-menu" title="メニュー">☰</button>
+      </div>
     </div>
-  </header>
 
-  <main class="layout">
-    <section class="forest-panel">
-      <div class="panel-head">
-        <h2>あなたの山林</h2>
-        <p class="hint">マスをクリックして作業を選びます。灰色のマスは未開拓地です。</p>
+    <!-- トースト通知 -->
+    <div id="toasts" class="toasts"></div>
+
+    <!-- 選択タイルのアクションカード -->
+    <div id="action-card" class="action-card hidden">
+      <button class="card-close" id="card-close">✕</button>
+      <div class="card-icon" id="card-icon"></div>
+      <div class="card-main">
+        <div class="card-title" id="card-title">タイトル</div>
+        <div class="card-sub" id="card-sub">説明</div>
+        <div class="card-actions" id="card-actions"></div>
       </div>
-      <div id="grid" class="grid" aria-label="森のマス目"></div>
-      <div class="legend">
-        <span>⬛ 空き地</span>
-        <span>🌱 苗木</span>
-        <span>🌿 若木</span>
-        <span>🌲 成木</span>
-        <span>🌳 主伐期</span>
-        <span>🔒 未開拓</span>
-      </div>
-    </section>
+    </div>
 
-    <aside class="control-panel">
-      <div class="action-box">
-        <h2>作業メニュー</h2>
-        <div id="cell-info" class="cell-info">マスを選択してください。</div>
-        <div id="actions" class="actions"></div>
-      </div>
+    <!-- 下段：建築バー -->
+    <div class="buildbar" id="buildbar"></div>
 
-      <div class="shop-box">
-        <h2>経営・拡大</h2>
-        <button id="btn-ship" class="big-btn ship">🚚 木材を出荷する</button>
-        <button id="btn-buy-land" class="big-btn">🗺️ 土地を購入</button>
-        <button id="btn-hire" class="big-btn">👷 作業員を雇う</button>
-        <button id="btn-buy-machine" class="big-btn">🚜 林業機械を購入</button>
-      </div>
-
-      <button id="btn-next" class="next-btn">⏭️ 次の季節へ</button>
-    </aside>
-  </main>
-
-  <section class="log-panel">
-    <h2>📋 作業日誌 ＆ 林業まめ知識</h2>
-    <div id="log" class="log"></div>
-  </section>
-
-  <div id="modal" class="modal hidden">
-    <div class="modal-card">
-      <h2 id="modal-title">植える樹種を選ぶ</h2>
-      <div id="modal-body" class="modal-body"></div>
-      <button id="modal-close" class="modal-close">閉じる</button>
+    <!-- 配置モードのヒント -->
+    <div id="place-hint" class="place-hint hidden">
+      <span id="place-hint-text">置く場所をタップ</span>
+      <button id="place-cancel">キャンセル</button>
     </div>
   </div>
 
+  <!-- ===== クエストパネル ===== -->
+  <div id="quest-panel" class="panel hidden">
+    <div class="panel-card">
+      <div class="panel-head"><h2>🎯 クエスト</h2><button class="panel-close" data-close="quest-panel">✕</button></div>
+      <div id="quest-list" class="quest-list"></div>
+    </div>
+  </div>
+
+  <!-- ===== メニュー ===== -->
+  <div id="menu-panel" class="panel hidden">
+    <div class="panel-card">
+      <div class="panel-head"><h2>☰ メニュー</h2><button class="panel-close" data-close="menu-panel">✕</button></div>
+      <div class="menu-body">
+        <p class="menu-stat" id="menu-stat"></p>
+        <button class="menu-btn" id="btn-help">❓ 遊び方・林業まめ知識</button>
+        <button class="menu-btn danger" id="btn-reset">🗑️ 最初からやり直す</button>
+        <p class="credit">もりのこ — 林業経営シミュレーション</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== ヘルプ ===== -->
+  <div id="help-panel" class="panel hidden">
+    <div class="panel-card">
+      <div class="panel-head"><h2>❓ 遊び方</h2><button class="panel-close" data-close="help-panel">✕</button></div>
+      <div class="help-body" id="help-body"></div>
+    </div>
+  </div>
+
+  <!-- ===== オープニング ===== -->
+  <div id="intro" class="intro">
+    <div class="intro-card">
+      <div class="intro-logo">🌲 もりのこ</div>
+      <div class="intro-tag">〜 木を植え、育て、伐り、運ぶ。林業タウン経営シミュレーション 〜</div>
+      <button id="btn-start" class="start-btn">▶ はじめる</button>
+      <p class="intro-note">苗木を植えて森を育て、木材を売って町を大きくしよう。<br>遊びながら林業のしくみが学べます。</p>
+    </div>
+  </div>
+
+  <script src="src/audio.js"></script>
+  <script src="src/fx.js"></script>
+  <script src="src/sprites.js"></script>
   <script src="src/game.js"></script>
 </body>
 </html>
