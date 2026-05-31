@@ -6,6 +6,26 @@
 
 ![ゲーム画面](assets/preview.png)
 
+## 🚀 Vercel で公開する
+
+このリポジトリは Vercel に**そのままデプロイできる静的サイト**です（ビルド不要・`vercel.json` 同梱）。
+
+**方法A：ダッシュボードから（おすすめ・数クリック）**
+1. [vercel.com/new](https://vercel.com/new) を開く
+2. この GitHub リポジトリ `koko1056-inv/game` を **Import**
+3. 設定はそのままで OK（Framework Preset は **Other**、ビルド/出力ディレクトリは空のまま）
+4. **Deploy** を押す → `https://<プロジェクト名>.vercel.app` で公開されます
+
+> 以降はこのブランチ（または `main`）へ push するたびに自動で再デプロイされます。
+
+**方法B：Vercel CLI（ローカルから）**
+```bash
+npm i -g vercel
+cd game
+vercel        # 初回はログイン＆プロジェクト作成
+vercel --prod # 本番公開
+```
+
 ## 🎮 遊び方
 
 1. `index.html` を開いて「▶ はじめる」。
